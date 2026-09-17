@@ -14,11 +14,12 @@ st.set_page_config(
 st.title("✈️ Painel de Monitoramento de Voos da ANAC")
 st.markdown("Consulta interativa com integração ao Portal de Dados Abertos da ANAC.")
 
-# --- GERADOR DE DADOS MOCK (CASO O MÊS SELECIONADO NÃO EXISTA NA ANAC) ---
+# --- GERADOR DE DADOS MOCK (CORRIGIDO PARA PANDAS RECENTE) ---
 def generate_fallback_data(ano: int, mes: int) -> pd.DataFrame:
     """Gera uma estrutura válida de dados simulados caso o arquivo da ANAC retorne 404."""
     np.random.seed(ano + mes)
-    datas = pd.date_range(start=f"{ano}-{mes:02d}-01", periods=1000, freq="H")
+    # Correção: freq="h" minúsculo para compatibilidade com o Pandas 2.2+
+    datas = pd.date_range(start=f"{ano}-{mes:02d}-01", periods=1000, freq="h")
     aeroportos = ['SBGR (Guarulhos)', 'SBSP (Congonhas)', 'SBRJ (Santos Dumont)', 'SBGL (Galeão)', 'SBFZ (Fortaleza)']
     
     df = pd.DataFrame({
@@ -51,16 +52,24 @@ def fetch_anac_data(ano: int, mes: int, allow_fallback: bool = True) -> tuple[pd
         response = requests.get(url, headers=headers, timeout=20)
         
         if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.content.decode('utf-8-sig', errors='ignore')), sep=';')
+            df = pd.read_csv(
+                io.StringIO(response.content.decode('utf-8-sig', errors='ignore')), 
+                sep=';', 
+                on_bad_lines='skip'
+            )
             
-            # Padroniza colunas
-            df.columns = [c.strip().upper() for c in df.columns]
+            # Padroniza colunas removendo espaços e convertendo para maiúsculo
+            df.columns = [str(c).strip().upper() for c in df.columns]
+            
             col_map = {
                 'ICAO AERÓDROMO ORIGEM': 'Aeroporto_Origem',
+                'ICAO AERODROMO ORIGEM': 'Aeroporto_Origem',
                 'SITUAÇÃO VOO': 'Situacao_Voo',
+                'SITUACAO VOO': 'Situacao_Voo',
                 'PARTIDA PREVISTA': 'Partida_Prevista',
                 'PARTIDA REAL': 'Partida_Real',
-                'NÚMERO PASSAGEIROS': 'Passageiros'
+                'NÚMERO PASSAGEIROS': 'Passageiros',
+                'NUMERO PASSAGEIROS': 'Passageiros'
             }
             df = df.rename(columns=col_map)
             
@@ -81,6 +90,8 @@ def fetch_anac_data(ano: int, mes: int, allow_fallback: bool = True) -> tuple[pd
             else:
                 return pd.DataFrame(), "nao_encontrado"
         else:
+            if allow_fallback:
+                return generate_fallback_data(ano, mes), "simulado"
             return pd.DataFrame(), "erro"
 
     except Exception as e:
@@ -93,7 +104,7 @@ st.sidebar.header("⚙️ Parâmetros de Busca")
 
 hoje = datetime.date.today()
 
-# Define limites razoáveis para evitar selecionar meses sem dados consolidados
+# Filtros de Ano e Mês
 ano_selecionado = st.sidebar.number_input("Ano da Consulta", min_value=2020, max_value=hoje.year, value=2025)
 mes_selecionado = st.sidebar.slider("Mês da Consulta", min_value=1, max_value=12, value=1)
 
@@ -105,30 +116,38 @@ with st.spinner("Buscando dados na base da ANAC..."):
 
 # --- ALERTAS E RENDERIZAÇÃO ---
 if origem == "simulado":
-    st.info(f"ℹ️ Os dados reais para **{mes_selecionado:02d}/{ano_selecionado}** ainda não foram publicados pela ANAC. Exibindo **dados simulados** para demonstração.")
+    st.info(f"ℹ️ Os dados reais para **{mes_selecionado:02d}/{ano_selecionado}** não foram encontrados no servidor da ANAC. Exibindo **dados simulados** para demonstração.")
 elif origem == "nao_encontrado":
-    st.warning(f"⚠️ Não foram encontrados dados no servidor da ANAC para **{mes_selecionado:02d}/{ano_selecionado}**. Escolha um período anterior.")
+    st.warning(f"⚠️ Não foram encontrados dados no servidor da ANAC para **{mes_selecionado:02d}/{ano_selecionado}**. Escolha outro período.")
 
 if not df_raw.empty:
-    terminais = sorted(df_raw['Aeroporto_Origem'].dropna().unique())
-    selected_terminal = st.sidebar.selectbox("Selecione o Aeroporto de Origem:", ["Todos"] + terminais)
+    if 'Aeroporto_Origem' in df_raw.columns:
+        terminais = sorted(df_raw['Aeroporto_Origem'].dropna().unique())
+        selected_terminal = st.sidebar.selectbox("Selecione o Aeroporto de Origem:", ["Todos"] + terminais)
 
-    if selected_terminal != "Todos":
-        df_filtered = df_raw[df_raw['Aeroporto_Origem'] == selected_terminal].copy()
+        if selected_terminal != "Todos":
+            df_filtered = df_raw[df_raw['Aeroporto_Origem'] == selected_terminal].copy()
+        else:
+            df_filtered = df_raw.copy()
     else:
         df_filtered = df_raw.copy()
 
     # KPIS
     c1, c2, c3 = st.columns(3)
-    c1.metric("Decolagens Realizadas", f"{len(df_filtered[df_filtered['Situacao_Voo'] == 'REALIZADO']):,}")
-    c2.metric("Voos Cancelados", f"{len(df_filtered[df_filtered['Situacao_Voo'] == 'CANCELADO']):,}")
-    c3.metric("Total de Passageiros", f"{int(df_filtered['Passageiros'].sum()):,}")
+    
+    total_decolagens = len(df_filtered[df_filtered['Situacao_Voo'] == 'REALIZADO']) if 'Situacao_Voo' in df_filtered.columns else len(df_filtered)
+    total_cancelados = len(df_filtered[df_filtered['Situacao_Voo'] == 'CANCELADO']) if 'Situacao_Voo' in df_filtered.columns else 0
+    total_pax = int(df_filtered['Passageiros'].sum()) if 'Passageiros' in df_filtered.columns else 0
+
+    c1.metric("Decolagens Realizadas", f"{total_decolagens:,}")
+    c2.metric("Voos Cancelados", f"{total_cancelados:,}")
+    c3.metric("Total de Passageiros", f"{total_pax:,}")
 
     st.markdown("---")
 
     # FAIXAS DE ATRASO
     st.subheader("⏱️ Faixas de Atraso (Voos Realizados)")
-    voos_realizados = df_filtered[df_filtered['Situacao_Voo'] == 'REALIZADO']
+    voos_realizados = df_filtered[df_filtered['Situacao_Voo'] == 'REALIZADO'] if 'Situacao_Voo' in df_filtered.columns else df_filtered
 
     if 'Atraso_Minutos' in voos_realizados.columns:
         a10 = len(voos_realizados[(voos_realizados['Atraso_Minutos'] > 0) & (voos_realizados['Atraso_Minutos'] <= 10)])

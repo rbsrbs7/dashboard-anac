@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import io
 import datetime
-import plotly as px
+import plotly.express as px
 
 # Configuração da página
 st.set_page_config(
